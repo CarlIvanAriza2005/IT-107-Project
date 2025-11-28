@@ -1,0 +1,8 @@
+# Node modules & build artifacts
+node_modules/
+
+
+# Environment variables
+.env*
+
+

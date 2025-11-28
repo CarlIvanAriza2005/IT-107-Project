@@ -1,20 +1,57 @@
 IT 110 GROUP 6 PROJECT - CURRENCY CONVERTER APPLICATION
+=======================================================
 
-Members:
+Team Members
+------------
 - Romeo Gucela (HTML Structure & Semantics)
 - Carl Ivan Ariza (CSS Styling & Layout)  
 - Marc Red Caspe (JavaScript Logic & API Integration)
 - Eian Gabriel Aguilar (Project Management & Documentation)
 
-Project Information:
-We have made a group portfolio that introduces our group members and the currency converter web app that our group developed. 
-The aim of this project is to demonstrate the use of an API as well as the implementation of error-handling logic for it through 
-the use of a currency converter web app. We obtained an API key from another online site and used JavaScript to establish the API 
-connection from our site to the other.
+Project Overview
+----------------
+We built a responsive portfolio site that showcases the team and features a
+currency converter powered by ExchangeRate-API. The converter now uses a secure
+backend proxy so that API keys are never exposed in the browser.
 
-API Information:
-API Used: ExchangeRate-API
-Documentation: https://exchangerate-api.com
+Tech Stack
+----------
+- Static frontend under `public/` (HTML/CSS/vanilla JS)
+- Local Express dev server (`server.js`) that mimics the Vercel deployment
+- Optional Vercel serverless API routes under `api/` for production
 
+Local Setup
+-----------
+1. Install dependencies (requires Node 18+):
+   ```
+   npm install
+   ```
+2. Copy the sample env file and set your real key:
+   ```
+   cp env.local.example .env.local
+   ```
+   Obtain a key from https://exchangerate-api.com and set `EXCHANGE_RATE_API_KEY`.
+3. Start the local dev server:
+   ```
+   npm run dev
+   ```
+   Visit http://localhost:3000 to use the converter. The Express server serves
+   static files and proxies `/api/convert` using your secret key.
 
+Deployment
+----------
+1. Make sure `.env.local` (or the Vercel dashboard) contains
+   `EXCHANGE_RATE_API_KEY`.
+2. Deploy with Vercel (CLI or dashboard). The provided `vercel.json` routes all
+   static assets from `public/` and serverless functions from `api/`. You can
+   still use `npm run deploy` for a production deployment once you're ready.
 
+API Reference
+-------------
+- Upstream API: ExchangeRate-API  
+- Docs: https://www.exchangerate-api.com/docs
+
+Security Notes
+--------------
+- Never commit `.env.local` or API keys to git.
+- Rate limiting, logging, and additional validation can be added in `api/convert.js`.
