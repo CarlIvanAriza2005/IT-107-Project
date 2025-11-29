@@ -7,8 +7,13 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const EXCHANGE_API_BASE = 'https://v6.exchangerate-api.com/v6';
 
+// Conservative whitelist of allowed currency codes (ISO 4217)
+const ALLOWED_CURRENCIES = new Set([
+    'USD','EUR','GBP','JPY','AUD','CAD','CHF','CNY','HKD','NZD','SEK','KRW','SGD','NOK','MXN','INR','RUB','BRL','ZAR','TRY','DKK','PLN','THB','MYR','IDR','HUF','CZK','ILS','PHP','CLP','AED','SAR','COP','ARS','VND','EGP','NGN','KZT','PKR','BDT'
+]);
+
 function validateCurrencyCode(code) {
-    return /^[A-Z]{3}$/.test(code);
+    return /^[A-Z]{3}$/.test(code) && ALLOWED_CURRENCIES.has(code);
 }
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -37,7 +42,7 @@ app.get('/api/convert', async (req, res) => {
     const toCurrency = String(to).toUpperCase();
 
     if (!validateCurrencyCode(fromCurrency) || !validateCurrencyCode(toCurrency)) {
-        return res.status(400).json({ success: false, error: 'Currency codes must be 3-letter ISO codes.' });
+        return res.status(400).json({ success: false, error: 'Currency codes must be supported 3-letter ISO codes.' });
     }
 
     const url = `${EXCHANGE_API_BASE}/${apiKey}/latest/${fromCurrency}`;
@@ -61,8 +66,22 @@ app.get('/api/convert', async (req, res) => {
             });
         }
 
-        const numericAmount = amount ? parseFloat(String(amount)) : null;
-        const convertedAmount = typeof numericAmount === 'number' && !Number.isNaN(numericAmount) ? numericAmount * rate : null;
+        // Strict amount parsing: no exponent, only plain decimal, limited precision and non-negative
+        let convertedAmount = null;
+        if (Object.prototype.hasOwnProperty.call(req.query, 'amount')) {
+            const rawAmt = String(amount).trim();
+            if (!/^[+-]?\d+(?:\.\d+)?$/.test(rawAmt)) {
+                return res.status(400).json({ success: false, error: '"amount" must be a plain decimal number without exponent.' });
+            }
+            const num = Number(rawAmt);
+            if (!Number.isFinite(num) || Number.isNaN(num) || num < 0) {
+                return res.status(400).json({ success: false, error: 'Invalid or negative "amount" provided.' });
+            }
+            if (rawAmt.split('.')[1] && rawAmt.split('.')[1].length > 8) {
+                return res.status(400).json({ success: false, error: '"amount" may have at most 8 decimal places.' });
+            }
+            convertedAmount = Number((num * rate).toFixed(6));
+        }
 
         return res.json({
             success: true,
@@ -89,5 +108,4 @@ app.get('*', (req, res) => {
 app.listen(PORT, () => {
     console.log(`Currency converter dev server running at http://localhost:${PORT}`);
 });
-
 
