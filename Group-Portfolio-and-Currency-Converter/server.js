@@ -1,11 +1,106 @@
 const path = require('path');
 const express = require('express');
+const cors = require('cors');
+const rateLimit = require('express-rate-limit');
+const helmet = require('helmet');
 const fetch = (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
 require('dotenv').config();
 
 const app = express();
+// Body parsing limits (protect from large payload DoS)
+const BODY_LIMIT = process.env.BODY_LIMIT || '10kb';
+app.use(express.json({ limit: BODY_LIMIT }));
+app.use(express.urlencoded({ limit: BODY_LIMIT, extended: false }));
+
+// Security headers
+app.use(helmet());
 const PORT = process.env.PORT || 3000;
 const EXCHANGE_API_BASE = 'https://v6.exchangerate-api.com/v6';
+
+// Robust CORS using the `cors` package and environment-driven policy.
+// Supports exact origins and simple wildcard patterns like `*.example.com`.
+const rawAllowed = (process.env.CORS_ALLOWED_ORIGINS || 'http://localhost:3000,http://127.0.0.1:3000')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+const EXACT_ALLOWED = new Set(rawAllowed.filter(o => !o.includes('*')));
+// Convert simple wildcard patterns to regular expressions.
+// Wildcard semantics: a pattern like `*.example.com` will match any subdomain depth
+// (for example `a.example.com` and `a.b.example.com`). This is intentional to
+// allow flexible subdomain coverage while still restricting the base domain.
+const WILDCARD_ALLOWED = rawAllowed
+    .filter(o => o.includes('*'))
+    .map(p => {
+        const hasProto = /^https?:\/\//i.test(p);
+        const escaped = p.replace(/([.+?^=!:${}()|[\]\/\\])/g, '\\$1');
+        const replaced = escaped.replace(/\*/g, '(?:[^.]+\\.)*[^.]+');
+        if (hasProto) {
+            return new RegExp('^' + replaced + '(?::\\d+)?$', 'i');
+        }
+        return new RegExp('^https?:\\/\\/' + replaced + '(?::\\d+)?$', 'i');
+    });
+
+const ALLOW_CREDENTIALS = String(process.env.CORS_ALLOW_CREDENTIALS || 'false').toLowerCase() === 'true';
+const PREFLIGHT_MAX_AGE = Number(process.env.CORS_PREFLIGHT_MAX_AGE || 600);
+const ALLOWED_METHODS = (process.env.CORS_ALLOWED_METHODS || 'GET,OPTIONS').split(',').map(m => m.trim()).filter(Boolean);
+const ALLOWED_HEADERS = (process.env.CORS_ALLOWED_HEADERS || 'Content-Type,Authorization').split(',').map(h => h.trim()).filter(Boolean);
+const EXPOSED_HEADERS = (process.env.CORS_EXPOSED_HEADERS || '').split(',').map(h => h.trim()).filter(Boolean);
+
+function isOriginAllowed(origin) {
+    if (!origin) return false;
+    if (EXACT_ALLOWED.has(origin)) return true;
+    return WILDCARD_ALLOWED.some(rx => rx.test(origin));
+}
+
+const corsOptions = {
+    origin: (origin, callback) => {
+        // `origin` will be `undefined` for same-origin or non-browser requests
+        if (!origin) return callback(null, true);
+        if (isOriginAllowed(origin)) return callback(null, true);
+        if (String(process.env.CORS_LOG_BLOCKED || 'false').toLowerCase() === 'true') {
+            console.warn('Blocked CORS request from origin:', origin);
+        }
+        return callback(null, false);
+    },
+    methods: ALLOWED_METHODS,
+    allowedHeaders: ALLOWED_HEADERS,
+    exposedHeaders: EXPOSED_HEADERS.length ? EXPOSED_HEADERS : undefined,
+    credentials: ALLOW_CREDENTIALS,
+    maxAge: PREFLIGHT_MAX_AGE,
+    // `optionsSuccessStatus` helps older browsers/clients that expect 200 instead of 204
+    optionsSuccessStatus: Number(process.env.CORS_OPTIONS_SUCCESS_STATUS || 204)
+};
+
+app.use('/api', cors(corsOptions));
+
+// Rate limiting: configurable via env vars
+// - `RATE_LIMIT_WINDOW_MS` : time window in milliseconds (default: 15 minutes)
+// - `RATE_LIMIT_MAX_REQUESTS` : max requests per window (default: 100)
+const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
+const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 100);
+
+const apiLimiter = rateLimit({
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    max: RATE_LIMIT_MAX_REQUESTS,
+    // Custom handler logs the event and returns a consistent JSON response
+    handler: (req, res /*, next */) => {
+        const ip = req.ip || req.connection && req.connection.remoteAddress;
+        const route = req.originalUrl || req.url;
+        const origin = req.get && req.get('Origin');
+        console.warn(JSON.stringify({ event: 'rate_limit_exceeded', ip, route, origin, time: new Date().toISOString() }));
+        return res.status(429).json({ success: false, error: 'Too many requests, please try again later.' });
+    },
+    standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
+    // Skip rate limiting for health checks (optional; comment out to rate-limit health checks too)
+    skip: (req) => req.path === '/api/health'
+});
+
+app.use('/api', apiLimiter);
+
+// Request timeout: set socket timeout on the server after listen
+const REQUEST_TIMEOUT_MS = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
 
 // Conservative whitelist of allowed currency codes (ISO 4217)
 const ALLOWED_CURRENCIES = new Set([
@@ -105,7 +200,13 @@ app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Currency converter dev server running at http://localhost:${PORT}`);
 });
+
+// Apply request socket timeout to mitigate slowloris-style attacks
+const REQUEST_TIMEOUT_MS_NUM = Number(process.env.REQUEST_TIMEOUT_MS || 30000);
+if (Number.isFinite(REQUEST_TIMEOUT_MS_NUM) && REQUEST_TIMEOUT_MS_NUM > 0) {
+    server.setTimeout(REQUEST_TIMEOUT_MS_NUM);
+}
 
