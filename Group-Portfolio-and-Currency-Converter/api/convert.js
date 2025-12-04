@@ -27,8 +27,14 @@ function validateAndNormalizeQuery(query) {
         return { ok: false, error: 'Missing required query parameters "from" and "to".' };
     }
 
-    const from = String(rawFrom).toUpperCase();
-    const to = String(rawTo).toUpperCase();
+    // Ensure types are strings to prevent prototype pollution
+    const from = String(rawFrom).trim().toUpperCase();
+    const to = String(rawTo).trim().toUpperCase();
+
+    // Prevent overly long strings
+    if (from.length > 10 || to.length > 10) {
+        return { ok: false, error: 'Invalid parameter length.' };
+    }
 
     if (!ISO_CURRENCY_REGEX.test(from) || !ISO_CURRENCY_REGEX.test(to)) {
         return { ok: false, error: 'Currency codes must be 3-letter ISO codes (A-Z).' };
@@ -47,6 +53,11 @@ function validateAndNormalizeQuery(query) {
             return { ok: false, error: 'If provided, "amount" must not be empty.' };
         }
 
+        // Limit input string length to prevent ReDoS
+        if (rawAmt.length > 30) {
+            return { ok: false, error: '"amount" input is too long.' };
+        }
+
         // Reject scientific notation and other weird formats by using a strict numeric parse
         // Allow only digits, optional decimal point and optional leading +/-. No exponent.
         if (!/^[+-]?\d+(?:\.\d+)?$/.test(rawAmt)) {
@@ -57,7 +68,6 @@ function validateAndNormalizeQuery(query) {
         if (!Number.isFinite(num) || Number.isNaN(num)) {
             return { ok: false, error: 'Invalid numeric value for "amount".' };
         }
-
 
         if (Math.abs(num) > MAX_AMOUNT) {
             return { ok: false, error: '"amount" is out of allowed range.' };
@@ -146,3 +156,6 @@ export default async function handler(req, res) {
         });
     }
 }
+
+// Export validation helper for unit testing and programmatic checks
+export { validateAndNormalizeQuery };
