@@ -5,14 +5,27 @@
   "main": "server.js",
   "scripts": {
     "dev": "node server.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "audit": "npm audit",
+    "audit-fix": "npm audit fix",
+    "test-validate": "node scripts/test-validate.js"
   },
   "dependencies": {
-    "express": "^4.18.2",
+    "cors": "^2.8.5",
     "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "express-rate-limit": "^8.2.1",
+    "helmet": "^6.0.0",
     "node-fetch": "^3.3.2"
   },
-  "keywords": ["currency", "converter", "api"],
+  "keywords": [
+    "currency",
+    "converter",
+    "api"
+  ],
   "author": "",
-  "license": "ISC"
+  "license": "ISC",
+  "engines": {
+    "node": ">=14.0.0"
+  }
 }
