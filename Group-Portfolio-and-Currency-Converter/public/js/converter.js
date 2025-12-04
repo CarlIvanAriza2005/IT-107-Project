@@ -2,7 +2,7 @@
 
 class CurrencyConverter {
     constructor() {
-        // Static fallback list of currencies (same as original app)
+        // Static fallback list of currencies 
         this.currencies = [
             { code: 'USD', name: 'United States Dollar' },
             { code: 'EUR', name: 'Euro' },
@@ -155,13 +155,33 @@ class CurrencyConverter {
             if (e.key === 'Enter') this.convertCurrency();
         });
 
-        // Input sanitization (same as original)
+        // Enhanced input sanitization with strict validation
         this.amountInput.addEventListener('input', () => {
-            const raw = this.amountInput.value;
-            const cleaned = raw
-                .replace(/[^0-9.,]/g, '')
-                .replace(/,/g, '.')
-                .replace(/(\..*)\./g, '$1');
+            let raw = this.amountInput.value;
+            
+            // Remove all non-numeric characters except dot
+            let cleaned = raw.replace(/[^0-9.]/g, '');
+            
+            // Handle multiple dots - keep only the first one
+            const parts = cleaned.split('.');
+            if (parts.length > 2) {
+                cleaned = parts[0] + '.' + parts.slice(1).join('');
+            }
+            
+            // Prevent leading zeros (e.g., "0001" becomes "1")
+            if (cleaned.startsWith('0') && cleaned.length > 1 && cleaned[1] !== '.') {
+                cleaned = cleaned.replace(/^0+/, '');
+                if (cleaned === '' || cleaned.startsWith('.')) {
+                    cleaned = '0' + cleaned;
+                }
+            }
+            
+            // Limit to 10 decimal places
+            if (cleaned.includes('.')) {
+                const [integer, decimal] = cleaned.split('.');
+                cleaned = integer + '.' + decimal.slice(0, 10);
+            }
+            
             this.amountInput.value = cleaned;
         });
 
@@ -250,15 +270,88 @@ class CurrencyConverter {
         });
     }
 
-    async convertCurrency() {
-        const amount = parseFloat(this.amountInput.value);
-        const fromCurrency = this.fromCurrencySelect.value;
-        const toCurrency = this.toCurrencySelect.value;
+    validateAmount(value) {
+        // Sanitize input: trim whitespace
+        const trimmed = String(value).trim();
+        
+        // Check if empty
+        if (trimmed === '') {
+            return { valid: false, error: 'Amount cannot be empty' };
+        }
+        
+        // Parse to float
+        const amount = parseFloat(trimmed);
+        
+        // Check for NaN
+        if (isNaN(amount)) {
+            return { valid: false, error: 'Amount must be a valid number' };
+        }
+        
+        // Check for positive value
+        if (amount <= 0) {
+            return { valid: false, error: 'Amount must be greater than 0' };
+        }
+        
+        // Check for maximum allowed value (prevent overflow/injection)
+        const MAX_AMOUNT = 1e10; // 10 billion
+        if (amount > MAX_AMOUNT) {
+            return { valid: false, error: 'Amount exceeds maximum limit' };
+        }
+        
+        // Check for valid decimal places (max 10 decimal places)
+        if (!Number.isFinite(amount)) {
+            return { valid: false, error: 'Amount must be a finite number' };
+        }
+        
+        return { valid: true, value: amount };
+    }
 
-        if (!amount || amount <= 0) {
-            this.showError('Please enter a valid amount');
+    validateCurrency(code) {
+        // Validate currency code format: exactly 3 uppercase letters
+        if (!code || typeof code !== 'string') {
+            return { valid: false, error: 'Invalid currency format' };
+        }
+        
+        const trimmed = code.trim().toUpperCase();
+        
+        // Check format: only 3 uppercase letters
+        if (!/^[A-Z]{3}$/.test(trimmed)) {
+            return { valid: false, error: 'Currency code must be 3 letters' };
+        }
+        
+        // Check if currency exists in the list
+        const exists = this.currencies.some(c => c.code === trimmed);
+        if (!exists) {
+            return { valid: false, error: 'Invalid currency code' };
+        }
+        
+        return { valid: true, value: trimmed };
+    }
+
+    async convertCurrency() {
+        // Validate amount with strict checks
+        const amountValidation = this.validateAmount(this.amountInput.value);
+        if (!amountValidation.valid) {
+            this.showError(amountValidation.error);
             return;
         }
+        const amount = amountValidation.value;
+        
+        // Validate from currency
+        const fromValidation = this.validateCurrency(this.fromCurrencySelect.value);
+        if (!fromValidation.valid) {
+            this.showError(fromValidation.error);
+            return;
+        }
+        const fromCurrency = fromValidation.value;
+        
+        // Validate to currency
+        const toValidation = this.validateCurrency(this.toCurrencySelect.value);
+        if (!toValidation.valid) {
+            this.showError(toValidation.error);
+            return;
+        }
+        const toCurrency = toValidation.value;
 
         if (fromCurrency === toCurrency) {
             this.showResult(amount, 1, fromCurrency, toCurrency, new Date().toISOString());
@@ -282,7 +375,28 @@ class CurrencyConverter {
         }
     }
 
+    sanitizeHTML(str) {
+        // Prevent XSS attacks by escaping HTML entities
+        const map = {
+            '&': '&amp;',
+            '<': '&lt;',
+            '>': '&gt;',
+            '"': '&quot;',
+            "'": '&#039;'
+        };
+        return String(str).replace(/[&<>"']/g, m => map[m]);
+    }
+
     async fetchExchangeRate(fromCurrency, toCurrency, amount) {
+        // Validate parameters again (defense in depth)
+        if (!/^[A-Z]{3}$/.test(fromCurrency) || !/^[A-Z]{3}$/.test(toCurrency)) {
+            throw new Error('Invalid currency format in request');
+        }
+        
+        if (!Number.isFinite(amount) || amount <= 0) {
+            throw new Error('Invalid amount in request');
+        }
+        
         const params = new URLSearchParams({
             from: fromCurrency,
             to: toCurrency,
@@ -296,16 +410,34 @@ class CurrencyConverter {
             }
 
             const data = await response.json();
-            if (data.success && typeof data.rate === 'number') {
-                return {
-                    success: true,
-                    rate: data.rate,
-                    convertedAmount: data.convertedAmount,
-                    lastUpdated: data.lastUpdated
-                };
+            
+            // Strict validation of API response
+            if (!data || typeof data !== 'object') {
+                throw new Error('Invalid API response format');
             }
-
-            throw new Error(data.error || 'API returned an error');
+            
+            if (data.success !== true) {
+                throw new Error(data.error || 'API returned an error');
+            }
+            
+            // Validate rate is a positive number
+            if (typeof data.rate !== 'number' || !Number.isFinite(data.rate) || data.rate <= 0) {
+                throw new Error('Invalid exchange rate received');
+            }
+            
+            // Validate convertedAmount if present
+            if (data.convertedAmount !== undefined) {
+                if (typeof data.convertedAmount !== 'number' || !Number.isFinite(data.convertedAmount) || data.convertedAmount < 0) {
+                    throw new Error('Invalid converted amount received');
+                }
+            }
+            
+            return {
+                success: true,
+                rate: data.rate,
+                convertedAmount: data.convertedAmount,
+                lastUpdated: data.lastUpdated
+            };
         } catch (error) {
             console.warn('Using fallback data due to API error:', error);
             const fallback = this.getMockExchangeRate(fromCurrency, toCurrency);
@@ -353,7 +485,8 @@ class CurrencyConverter {
 
     showError(message) {
         this.hideAllResults();
-        this.errorMessage.textContent = message;
+        // Sanitize message to prevent XSS attacks
+        this.errorMessage.textContent = this.sanitizeHTML(message);
         this.errorDiv.classList.remove('hidden');
         this.convertBtn.disabled = false;
     }
