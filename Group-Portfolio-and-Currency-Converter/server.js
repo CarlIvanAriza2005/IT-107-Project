@@ -6,6 +6,9 @@ const helmet = require('helmet');
 const fetch = (...args) => import('node-fetch').then(({ default: fetchFn }) => fetchFn(...args));
 require('dotenv').config();
 
+// Import logging utilities
+const { logger, logRequest, logSecurityEvent, logError, getClientIP } = require('./utils/logger');
+
 const app = express();
 // Body parsing limits (protect from large payload DoS)
 const BODY_LIMIT = process.env.BODY_LIMIT || '10kb';
@@ -14,6 +17,10 @@ app.use(express.urlencoded({ limit: BODY_LIMIT, extended: false }));
 
 // Security headers
 app.use(helmet());
+
+// Request logging middleware (should be early in the chain)
+app.use(logRequest);
+
 const PORT = process.env.PORT || 3000;
 const EXCHANGE_API_BASE = 'https://v6.exchangerate-api.com/v6';
 
@@ -58,9 +65,9 @@ const corsOptions = {
         // `origin` will be `undefined` for same-origin or non-browser requests
         if (!origin) return callback(null, true);
         if (isOriginAllowed(origin)) return callback(null, true);
-        if (String(process.env.CORS_LOG_BLOCKED || 'false').toLowerCase() === 'true') {
-            console.warn('Blocked CORS request from origin:', origin);
-        }
+        
+        // Always log blocked CORS requests as security events
+        // Note: req is not available in the origin callback, so we'll log it in middleware
         return callback(null, false);
     },
     methods: ALLOWED_METHODS,
@@ -72,7 +79,21 @@ const corsOptions = {
     optionsSuccessStatus: Number(process.env.CORS_OPTIONS_SUCCESS_STATUS || 204)
 };
 
-app.use('/api', cors(corsOptions));
+// CORS middleware with enhanced logging
+app.use('/api', (req, res, next) => {
+    const origin = req.headers.origin;
+    
+    // Check if origin would be blocked
+    if (origin && !isOriginAllowed(origin)) {
+        logSecurityEvent('CORS_BLOCKED', {
+            blockedOrigin: origin,
+            path: req.path,
+            method: req.method
+        }, req);
+    }
+    
+    cors(corsOptions)(req, res, next);
+});
 
 // Rate limiting: configurable via env vars
 // - `RATE_LIMIT_WINDOW_MS` : time window in milliseconds (default: 15 minutes)
@@ -85,10 +106,11 @@ const apiLimiter = rateLimit({
     max: RATE_LIMIT_MAX_REQUESTS,
     // Custom handler logs the event and returns a consistent JSON response
     handler: (req, res /*, next */) => {
-        const ip = req.ip || req.connection && req.connection.remoteAddress;
-        const route = req.originalUrl || req.url;
-        const origin = req.get && req.get('Origin');
-        console.warn(JSON.stringify({ event: 'rate_limit_exceeded', ip, route, origin, time: new Date().toISOString() }));
+        logSecurityEvent('RATE_LIMIT_EXCEEDED', {
+            route: req.originalUrl || req.url,
+            origin: req.get && req.get('Origin'),
+            userAgent: req.headers['user-agent']
+        }, req);
         return res.status(429).json({ success: false, error: 'Too many requests, please try again later.' });
     },
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
@@ -126,10 +148,19 @@ app.get('/api/convert', async (req, res) => {
     const apiKey = process.env.EXCHANGE_RATE_API_KEY;
 
     if (!from || !to) {
+        logSecurityEvent('VALIDATION_FAILED', {
+            reason: 'Missing required query parameters',
+            providedParams: Object.keys(req.query || {}),
+            path: req.path
+        }, req);
         return res.status(400).json({ success: false, error: 'Missing required query parameters "from" and "to".' });
     }
 
     if (!apiKey) {
+        logError(new Error('Exchange rate API key is not configured'), {
+            path: req.path,
+            ip: getClientIP(req)
+        });
         return res.status(500).json({ success: false, error: 'Exchange rate API key is not configured on the server.' });
     }
 
@@ -137,6 +168,12 @@ app.get('/api/convert', async (req, res) => {
     const toCurrency = String(to).toUpperCase();
 
     if (!validateCurrencyCode(fromCurrency) || !validateCurrencyCode(toCurrency)) {
+        logSecurityEvent('VALIDATION_FAILED', {
+            reason: 'Invalid currency code',
+            fromCurrency,
+            toCurrency,
+            path: req.path
+        }, req);
         return res.status(400).json({ success: false, error: 'Currency codes must be supported 3-letter ISO codes.' });
     }
 
@@ -155,6 +192,12 @@ app.get('/api/convert', async (req, res) => {
 
         const rate = data.conversion_rates[toCurrency];
         if (typeof rate !== 'number') {
+            logger.warn('Exchange rate not available', {
+                fromCurrency,
+                toCurrency,
+                path: req.path,
+                ip: getClientIP(req)
+            });
             return res.status(400).json({
                 success: false,
                 error: `Exchange rate from ${fromCurrency} to ${toCurrency} not available.`
@@ -166,13 +209,30 @@ app.get('/api/convert', async (req, res) => {
         if (Object.prototype.hasOwnProperty.call(req.query, 'amount')) {
             const rawAmt = String(amount).trim();
             if (!/^[+-]?\d+(?:\.\d+)?$/.test(rawAmt)) {
+                logSecurityEvent('VALIDATION_FAILED', {
+                    reason: 'Invalid amount format',
+                    providedAmount: rawAmt,
+                    path: req.path
+                }, req);
                 return res.status(400).json({ success: false, error: '"amount" must be a plain decimal number without exponent.' });
             }
             const num = Number(rawAmt);
             if (!Number.isFinite(num) || Number.isNaN(num) || num < 0) {
+                logSecurityEvent('VALIDATION_FAILED', {
+                    reason: 'Invalid or negative amount',
+                    providedAmount: rawAmt,
+                    parsedValue: num,
+                    path: req.path
+                }, req);
                 return res.status(400).json({ success: false, error: 'Invalid or negative "amount" provided.' });
             }
             if (rawAmt.split('.')[1] && rawAmt.split('.')[1].length > 8) {
+                logSecurityEvent('VALIDATION_FAILED', {
+                    reason: 'Amount exceeds decimal precision limit',
+                    providedAmount: rawAmt,
+                    decimalPlaces: rawAmt.split('.')[1].length,
+                    path: req.path
+                }, req);
                 return res.status(400).json({ success: false, error: '"amount" may have at most 8 decimal places.' });
             }
             convertedAmount = Number((num * rate).toFixed(6));
@@ -187,7 +247,13 @@ app.get('/api/convert', async (req, res) => {
             lastUpdated: data.time_last_update_utc
         });
     } catch (error) {
-        console.error('Error in /api/convert:', error);
+        logError(error, {
+            path: req.path,
+            fromCurrency,
+            toCurrency,
+            ip: getClientIP(req),
+            userAgent: req.headers['user-agent']
+        });
         return res.status(502).json({
             success: false,
             error: 'Failed to fetch exchange rate from upstream API.'
@@ -197,11 +263,41 @@ app.get('/api/convert', async (req, res) => {
 
 // Fallback to index.html for unknown routes (SPA-friendly)
 app.get('*', (req, res) => {
+    // Check if this is an API route that doesn't exist
+    if (req.path.startsWith('/api/')) {
+        logSecurityEvent('SUSPICIOUS_ROUTE', {
+            reason: 'Non-existent API endpoint accessed',
+            attemptedPath: req.path,
+            query: req.query
+        }, req);
+        return res.status(404).json({ success: false, error: 'API endpoint not found' });
+    }
+    
+    // Log suspicious non-API routes that might indicate reconnaissance
+    const suspiciousPatterns = [
+        /\.(php|asp|jsp|sh|bat|exe)$/i,
+        /(admin|wp-admin|phpmyadmin|\.env|config|backup)/i,
+        /(\.\.|\/etc|\/proc|\/sys)/i
+    ];
+    
+    const isSuspicious = suspiciousPatterns.some(pattern => pattern.test(req.path));
+    if (isSuspicious) {
+        logSecurityEvent('SUSPICIOUS_ROUTE', {
+            reason: 'Suspicious path pattern detected',
+            attemptedPath: req.path,
+            query: req.query
+        }, req);
+    }
+    
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
 const server = app.listen(PORT, () => {
-    console.log(`Currency converter dev server running at http://localhost:${PORT}`);
+    logger.info('Server started', {
+        port: PORT,
+        environment: process.env.NODE_ENV || 'development',
+        timestamp: new Date().toISOString()
+    });
 });
 
 // Apply request socket timeout to mitigate slowloris-style attacks
