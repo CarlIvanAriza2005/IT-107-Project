@@ -96,9 +96,11 @@ export default async function handler(req, res) {
 
     const apiKey = process.env.EXCHANGE_RATE_API_KEY;
     if (!apiKey) {
+        // Generic error message - don't reveal internal configuration
+        console.error('Exchange rate API key is not configured');
         return res.status(500).json({
             success: false,
-            error: 'Exchange rate API key is not configured on the server.'
+            error: 'Service temporarily unavailable. Please try again later.'
         });
     }
 

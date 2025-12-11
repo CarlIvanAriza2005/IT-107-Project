@@ -133,13 +133,38 @@ logger.info('Logger initialized', {
 });
 
 // Helper function to extract client IP
+// Priority: req.ip (validated when trust proxy is set) > direct connection > headers
+// Only use X-Forwarded-For if trust proxy is configured (Express validates it)
 function getClientIP(req) {
-    return req.ip ||
-           req.connection?.remoteAddress ||
-           req.socket?.remoteAddress ||
-           req.headers['x-forwarded-for']?.split(',')[0]?.trim() ||
-           req.headers['x-real-ip'] ||
-           'unknown';
+    // req.ip is the most reliable when trust proxy is configured correctly
+    // It's validated by Express based on trust proxy settings
+    if (req.ip && req.ip !== '::1' && req.ip !== '127.0.0.1') {
+        return req.ip;
+    }
+    
+    // Fallback to direct connection IP (most reliable for non-proxy setups)
+    const directIP = req.connection?.remoteAddress || req.socket?.remoteAddress;
+    if (directIP) {
+        // Remove IPv6 prefix if present
+        return directIP.replace(/^::ffff:/, '');
+    }
+    
+    // Only use headers if we're behind a trusted proxy (indicated by req.ip being set)
+    // This prevents IP spoofing when not behind a proxy
+    if (req.ip) {
+        // If req.ip exists, we're behind a proxy, so X-Real-IP is safe
+        if (req.headers['x-real-ip']) {
+            return req.headers['x-real-ip'];
+        }
+        // X-Forwarded-For is validated by Express when trust proxy is set
+        const forwarded = req.headers['x-forwarded-for'];
+        if (forwarded) {
+            // Take the first IP (original client) from the chain
+            return forwarded.split(',')[0].trim();
+        }
+    }
+    
+    return 'unknown';
 }
 
 // Helper function to sanitize sensitive data from request

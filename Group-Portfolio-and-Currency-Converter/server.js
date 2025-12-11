@@ -10,6 +10,22 @@ require('dotenv').config();
 const { logger, logRequest, logSecurityEvent, logError, getClientIP } = require('./utils/logger');
 
 const app = express();
+
+// Trust proxy setting - only trust X-Forwarded-For when behind a known reverse proxy
+// Set TRUSTED_PROXY_IPS env var to comma-separated list of proxy IPs (e.g., "127.0.0.1,::1")
+// For Vercel/cloud deployments, set to 'true' to trust all proxies
+const trustProxySetting = process.env.TRUSTED_PROXY_IPS;
+if (trustProxySetting === 'true' || process.env.VERCEL === 'true') {
+    app.set('trust proxy', true);
+} else if (trustProxySetting) {
+    // Trust specific IPs only
+    const trustedIPs = trustProxySetting.split(',').map(ip => ip.trim()).filter(Boolean);
+    app.set('trust proxy', (ip) => trustedIPs.includes(ip));
+} else {
+    // Default: don't trust proxy (most secure for local dev)
+    app.set('trust proxy', false);
+}
+
 // Body parsing limits (protect from large payload DoS)
 const BODY_LIMIT = process.env.BODY_LIMIT || '10kb';
 app.use(express.json({ limit: BODY_LIMIT }));
@@ -101,6 +117,14 @@ app.use('/api', (req, res, next) => {
 const RATE_LIMIT_WINDOW_MS = Number(process.env.RATE_LIMIT_WINDOW_MS || 15 * 60 * 1000);
 const RATE_LIMIT_MAX_REQUESTS = Number(process.env.RATE_LIMIT_MAX_REQUESTS || 100);
 
+// Separate rate limiter for health endpoint (more lenient but still limited)
+const healthLimiter = rateLimit({
+    windowMs: RATE_LIMIT_WINDOW_MS,
+    max: RATE_LIMIT_MAX_REQUESTS * 5, // 5x more lenient for health checks
+    standardHeaders: true,
+    legacyHeaders: false
+});
+
 const apiLimiter = rateLimit({
     windowMs: RATE_LIMIT_WINDOW_MS,
     max: RATE_LIMIT_MAX_REQUESTS,
@@ -114,11 +138,11 @@ const apiLimiter = rateLimit({
         return res.status(429).json({ success: false, error: 'Too many requests, please try again later.' });
     },
     standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
-    legacyHeaders: false, // Disable the `X-RateLimit-*` headers
-    // Skip rate limiting for health checks (optional; comment out to rate-limit health checks too)
-    skip: (req) => req.path === '/api/health'
+    legacyHeaders: false // Disable the `X-RateLimit-*` headers
 });
 
+// Apply rate limiting: health endpoint gets lenient limiter, others get strict
+app.get('/api/health', healthLimiter);
 app.use('/api', apiLimiter);
 
 // Request timeout: set socket timeout on the server after listen
@@ -133,7 +157,23 @@ function validateCurrencyCode(code) {
     return /^[A-Z]{3}$/.test(code) && ALLOWED_CURRENCIES.has(code);
 }
 
-app.use(express.static(path.join(__dirname, 'public')));
+// Serve static files from public directory only
+// Explicitly exclude logs directory and other sensitive paths
+app.use(express.static(path.join(__dirname, 'public'), {
+    // Prevent directory listing
+    index: false,
+    // Don't serve files outside public directory
+    dotfiles: 'ignore'
+}));
+
+// Explicitly block access to logs directory
+app.use('/logs', (req, res) => {
+    logSecurityEvent('BLOCKED_PATH_ACCESS', {
+        reason: 'Attempted access to logs directory',
+        path: req.path
+    }, req);
+    res.status(403).json({ success: false, error: 'Access denied' });
+});
 
 app.get('/api/health', (req, res) => {
     res.json({
@@ -161,7 +201,8 @@ app.get('/api/convert', async (req, res) => {
             path: req.path,
             ip: getClientIP(req)
         });
-        return res.status(500).json({ success: false, error: 'Exchange rate API key is not configured on the server.' });
+        // Generic error message for users - don't reveal internal configuration
+        return res.status(500).json({ success: false, error: 'Service temporarily unavailable. Please try again later.' });
     }
 
     const fromCurrency = String(from).toUpperCase();
